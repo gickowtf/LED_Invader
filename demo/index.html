@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>LED Invader — Virtual Demo</title>
+<style>
+  :root {
+    --led-off: #1a1a1a;
+  }
+  body {
+    background: #111;
+    color: #eee;
+    font-family: "Courier New", monospace;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 24px;
+  }
+  h1 { margin-bottom: 4px; }
+  .sub { color: #888; margin-top: 0; margin-bottom: 20px; font-size: 13px; }
+
+  .strip {
+    display: flex;
+    flex-direction: row-reverse; /* index 0 = bottom of physical strip = left visually,
+                                     but reversed so "top" (spawn) is on the right */
+    gap: 3px;
+    background: #000;
+    padding: 10px;
+    border-radius: 8px;
+    box-shadow: 0 0 20px rgba(0,0,0,0.6) inset;
+    margin-bottom: 20px;
+  }
+  .led {
+    width: 12px;
+    height: 32px;
+    border-radius: 2px;
+    background: var(--led-off);
+    transition: background 40ms linear;
+  }
+
+  .oled {
+    width: 260px;
+    height: 130px;
+    background: #001;
+    border: 4px solid #333;
+    border-radius: 6px;
+    color: #4ff;
+    padding: 10px;
+    font-size: 13px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    box-shadow: 0 0 12px rgba(0,255,255,0.15) inset;
+    margin-bottom: 24px;
+  }
+
+  .controls {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 12px;
+  }
+  .btn {
+    width: 70px;
+    height: 70px;
+    border-radius: 50%;
+    border: 4px solid #222;
+    cursor: pointer;
+    font-weight: bold;
+    color: #fff;
+    text-shadow: 0 1px 2px #000;
+    user-select: none;
+    transition: transform 60ms;
+  }
+  .btn:active { transform: scale(0.9); }
+  .btn.red    { background: radial-gradient(circle at 35% 30%, #ff8080, #c0392b); }
+  .btn.green  { background: radial-gradient(circle at 35% 30%, #9fffa0, #27ae60); }
+  .btn.blue   { background: radial-gradient(circle at 35% 30%, #9fd8ff, #2980b9); }
+
+  .hint {
+    color: #666;
+    font-size: 12px;
+    margin-top: 4px;
+    text-align: center;
+    max-width: 420px;
+  }
+
+  .footer {
+    margin-top: 28px;
+    font-size: 11px;
+    color: #555;
+  }
+</style>
+</head>
+<body>
+
+<h1>🕹️ LED Invader</h1>
+<p class="sub">Virtual demo — approximates the CircuitPython game logic in the browser</p>
+
+<div class="strip" id="strip"></div>
+
+<div class="oled" id="oled">Press any button
+to start
+
+Hi: 0</div>
+
+<div class="controls">
+  <div class="btn red"    id="btn-red">R</div>
+  <div class="btn green"  id="btn-green">G</div>
+  <div class="btn blue"   id="btn-blue">B</div>
+</div>
+
+<p class="hint">
+  Buttons fire a matching-color shot up the strip. Match a falling block's color to clear it
+  (and any connected same-color chain); a wrong-color hit costs a life. Keyboard: R / G / B keys.
+</p>
+
+<div class="footer">Simulates code.py — WS2812 strip, SSD1306 HUD, and arcade buttons.</div>
+
+<script>
+(() => {
+  const NUM_LEDS = 60;
+  const COLORS = ["#ff3b30", "#34c759", "#0a84ff"]; // red, green, blue
+  const COLOR_NAMES = ["red", "green", "blue"];
+
+  // ---- DOM setup ----
+  const stripEl = document.getElementById("strip");
+  const oledEl = document.getElementById("oled");
+  const leds = [];
+  for (let i = 0; i < NUM_LEDS; i++) {
+    const d = document.createElement("div");
+    d.className = "led";
+    stripEl.appendChild(d);
+    leds.push(d);
+  }
+
+  // ---- Audio (square-wave SFX, mirrors pwmio tone approach) ----
+  let actx = null;
+  function ensureAudio() {
+    if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  // Shared across all playSeq() calls so a new SFX always stops whatever
+  // oscillator is currently ringing before starting its own tone. Without
+  // this, an interrupting sequence would orphan the previous oscillator
+  // (it keeps playing forever, layering into what sounds like one tone).
+  let sfxTimer = null;
+  let activeOsc = null;
+  function stopActiveTone() {
+    if (activeOsc) {
+      try { activeOsc.stop(); } catch (e) {}
+      activeOsc = null;
+    }
+  }
+  function playSeq(seq) {
+    ensureAudio();
+    if (sfxTimer) clearTimeout(sfxTimer);
+    stopActiveTone();
+    let i = 0;
+    function step() {
+      stopActiveTone();
+      if (i >= seq.length) return;
+      const [freq, dur] = seq[i++];
+      if (freq > 0) {
+        const osc = actx.createOscillator();
+        osc.type = "square";
+        osc.frequency.value = freq;
+        const gain = actx.createGain();
+        gain.gain.value = 0.08;
+        osc.connect(gain).connect(actx.destination);
+        osc.start();
+        // Schedule the stop on the audio clock itself (not a JS timer), so the
+        // tone always ends on time even if setTimeout is throttled (e.g. an
+        // unfocused/background tab), instead of ringing on indefinitely.
+        osc.stop(actx.currentTime + dur / 1000);
+        activeOsc = osc;
+      }
+      sfxTimer = setTimeout(step, dur * 1000);
+    }
+    step();
+  }
+  const SFX = {
+    start: () => playSeq([[523,80],[659,80],[784,120],[0,40],[784,80],[988,80],[1046,160]]),
+    shot:  () => playSeq([[1400,30],[900,40]]),
+    hit:   () => playSeq([[1000,60]]),
+    wrong: () => playSeq([[250,120]]),
+    levelUp: () => playSeq([[500,40],[700,40],[900,40],[1200,40]]),
+    gameOver: () => playSeq([[600,120],[450,120],[320,120],[220,120]]),
+    weapon: () => playSeq([[800,60],[1100,60],[1500,100]]),
+    rocket: () => playSeq([[400,40],[600,40],[900,60],[1200,80],[0,40],[1200,80],[0,40],[1200,80]]),
+  };
+
+  // ---- Game state ----
+  let stripState = new Array(NUM_LEDS).fill(null);
+  let shots = []; // {color, pos}
+  let score = 0, lastScore = 0, level = 1, lives = 3;
+  let highscore = parseInt(localStorage.getItem("led_invader_highscore") || "0", 10);
+  let blocksClearedTotal = 0;
+  const speedupEvery = 10;
+  let nextLevelBlocks = speedupEvery;
+  let stepTime = 1.5;
+  const minStepTime = 0.05;
+  let shotStepTime = 0.01;
+  let gameState = "START"; // START, RUNNING, GAME_OVER
+
+  let weaponSlowUntil = 0, weaponMonoUntil = 0, weaponMonoColor = null, weaponRocketCharges = 0;
+  let effectText = null, effectTimer = 0;
+
+  function now() { return performance.now() / 1000; }
+
+  function saveHighscore() {
+    localStorage.setItem("led_invader_highscore", String(highscore));
+  }
+
+  function updateDisplay() {
+    let text;
+    if (gameState === "START") {
+      text = `Press any button\nto start\n\nHi: ${highscore}`;
+    } else if (gameState === "RUNNING") {
+      text = `Score: ${score}\nLevel: ${level}\nLives: ${lives}\nHi: ${highscore}`;
+    } else {
+      text = `GAME OVER\nScore: ${lastScore}\nHi: ${highscore}\n\nPress any`;
+    }
+    if (effectText) {
+      text += `\n\n>> ${effectText} <<`;
+    }
+    oledEl.textContent = text;
+  }
+
+  function showEffect(msg, duration) {
+    effectText = msg;
+    effectTimer = now() + duration;
+    updateDisplay();
+  }
+
+  function spawnTop() {
+    const t = now();
+    if (t < weaponMonoUntil && weaponMonoColor !== null) {
+      return Math.random() < 0.85 ? weaponMonoColor : null;
+    }
+    return Math.random() < 0.85 ? Math.floor(Math.random() * 3) : null;
+  }
+
+  function shiftDown() {
+    for (let i = 0; i < NUM_LEDS - 1; i++) stripState[i] = stripState[i + 1];
+    stripState[NUM_LEDS - 1] = spawnTop();
+  }
+
+  function clearChainAt(index) {
+    if (index === null || stripState[index] === null) return 0;
+    const color = stripState[index];
+    let start = index, end = index;
+    while (start > 0 && stripState[start - 1] === color) start--;
+    while (end < NUM_LEDS - 1 && stripState[end + 1] === color) end++;
+    const length = end - start + 1;
+    for (let i = end + 1; i < NUM_LEDS; i++) stripState[i - length] = stripState[i];
+    for (let i = NUM_LEDS - length; i < NUM_LEDS; i++) stripState[i] = null;
+    return length;
+  }
+
+  function clearChainRocket(index) {
+    if (index === null || stripState[index] === null) return 0;
+    const color = stripState[index];
+    let start = index, end = index;
+    while (start > 0 && stripState[start - 1] === color) start--;
+    while (end < NUM_LEDS - 1 && stripState[end + 1] === color) end++;
+    let cleared = 0;
+    for (let i = start; i < NUM_LEDS; i++) {
+      if (stripState[i] !== null) { stripState[i] = null; cleared++; }
+    }
+    let write = 0;
+    for (let i = 0; i < NUM_LEDS; i++) {
+      if (stripState[i] !== null) { stripState[write] = stripState[i]; write++; }
+    }
+    for (let i = write; i < NUM_LEDS; i++) stripState[i] = null;
+    return cleared;
+  }
+
+  function unlockRandomWeapon() {
+    const w = ["slow", "mono", "rocket"][Math.floor(Math.random() * 3)];
+    const t = now();
+    if (w === "slow") {
+      weaponSlowUntil = t + 5.0;
+      showEffect("SLOW TIME!", 1.0);
+      SFX.weapon();
+    } else if (w === "mono") {
+      weaponMonoUntil = t + 8.0;
+      weaponMonoColor = Math.floor(Math.random() * 3);
+      for (let i = 0; i < NUM_LEDS; i++) if (stripState[i] !== null) stripState[i] = weaponMonoColor;
+      for (let i = 0; i < shots.length; i++) shots[i].color = weaponMonoColor;
+      showEffect("MONO COLOR!", 1.0);
+      SFX.weapon();
+    } else {
+      weaponRocketCharges++;
+      showEffect("ROCKET +1", 1.0);
+      SFX.weapon();
+    }
+  }
+
+  function gameOver() {
+    lastScore = score;
+    if (score > highscore) {
+      highscore = score;
+      saveHighscore();
+      showEffect("NEW HIGHSCORE!", 2.0);
+    } else {
+      showEffect("GAME OVER", 1.5);
+    }
+    SFX.gameOver();
+
+    stripState = new Array(NUM_LEDS).fill(null);
+    shots = [];
+    score = 0; lives = 3; level = 1;
+    blocksClearedTotal = 0; nextLevelBlocks = speedupEvery;
+    stepTime = 1.5;
+    weaponSlowUntil = 0; weaponMonoUntil = 0; weaponMonoColor = null; weaponRocketCharges = 0;
+    gameState = "GAME_OVER";
+    draw();
+    updateDisplay();
+  }
+
+  function startNewGame() {
+    stripState = new Array(NUM_LEDS).fill(null);
+    shots = [];
+    score = 0; lastScore = 0; lives = 3; level = 1;
+    blocksClearedTotal = 0; nextLevelBlocks = speedupEvery;
+    stepTime = 1.5;
+    weaponSlowUntil = 0; weaponMonoUntil = 0; weaponMonoColor = null; weaponRocketCharges = 0;
+    gameState = "RUNNING";
+    draw();
+    updateDisplay();
+    showEffect("READY!", 0.7);
+    SFX.start();
+  }
+
+  function updateShotsAndCollisions() {
+    if (gameState !== "RUNNING") return;
+    const newShots = [];
+    for (const shot of shots) {
+      shot.pos += 1;
+      if (shot.pos >= NUM_LEDS) continue;
+      const block = stripState[shot.pos];
+      if (block !== null) {
+        if (block === shot.color) {
+          let cleared;
+          if (weaponRocketCharges > 0) {
+            cleared = clearChainRocket(shot.pos);
+            weaponRocketCharges--;
+            showEffect("ROCKET!", 0.5);
+            SFX.rocket();
+          } else {
+            cleared = clearChainAt(shot.pos);
+          }
+          const points = cleared * level;
+          score += points;
+          blocksClearedTotal += cleared;
+          if (weaponRocketCharges === 0) {
+            showEffect("HIT!", 0.2);
+            SFX.hit();
+          }
+          if (cleared >= 3 || stripState.every(v => v === null)) unlockRandomWeapon();
+          if (blocksClearedTotal >= nextLevelBlocks && stepTime > minStepTime) {
+            level++;
+            stepTime = Math.max(minStepTime, stepTime - 0.1);
+            nextLevelBlocks += speedupEvery;
+            showEffect("LEVEL UP!", 1.0);
+            SFX.levelUp();
+          }
+        } else {
+          lives--;
+          stepTime = Math.max(minStepTime, stepTime - 0.02);
+          showEffect("MISS!", 0.3);
+          SFX.wrong();
+          if (lives <= 0) { gameOver(); return; }
+        }
+        updateDisplay();
+        continue;
+      } else {
+        newShots.push(shot);
+      }
+    }
+    shots = newShots;
+  }
+
+  function draw() {
+    for (let i = 0; i < NUM_LEDS; i++) {
+      leds[i].style.background = stripState[i] === null ? "var(--led-off)" : COLORS[stripState[i]];
+      leds[i].style.boxShadow = "none";
+    }
+    for (const shot of shots) {
+      if (shot.pos >= 0 && shot.pos < NUM_LEDS) {
+        leds[shot.pos].style.background = COLORS[shot.color];
+        leds[shot.pos].style.boxShadow = `0 0 8px 2px ${COLORS[shot.color]}`;
+      }
+    }
+  }
+
+  function fire(colorIdx) {
+    if (gameState === "START" || gameState === "GAME_OVER") {
+      startNewGame();
+      return;
+    }
+    if (gameState !== "RUNNING") return;
+    let color = colorIdx;
+    const t = now();
+    if (t < weaponMonoUntil && weaponMonoColor !== null) color = weaponMonoColor;
+    shots.push({ color, pos: 0 });
+    SFX.shot();
+    draw();
+  }
+
+  document.getElementById("btn-red").addEventListener("click", () => fire(0));
+  document.getElementById("btn-green").addEventListener("click", () => fire(1));
+  document.getElementById("btn-blue").addEventListener("click", () => fire(2));
+  window.addEventListener("keydown", (e) => {
+    if (e.repeat) return; // ignore OS key auto-repeat while held; fire only once per press
+    const k = e.key.toLowerCase();
+    if (k === "r") fire(0);
+    else if (k === "g") fire(1);
+    else if (k === "b") fire(2);
+  });
+
+  // ---- Main loop (mirrors while True: in code.py) ----
+  let lastStep = now();
+  let lastShotStep = now();
+
+  function loop() {
+    const t = now();
+
+    if (effectText && t > effectTimer) {
+      effectText = null;
+      updateDisplay();
+    }
+
+    if (gameState === "RUNNING" && t - lastShotStep >= shotStepTime) {
+      lastShotStep = t;
+      updateShotsAndCollisions();
+      draw();
+    }
+
+    let currentStepTime = stepTime;
+    if (t < weaponSlowUntil) currentStepTime = stepTime * 1.5;
+
+    if (gameState === "RUNNING" && t - lastStep >= currentStepTime) {
+      lastStep = t;
+      shiftDown();
+      if (stripState[0] !== null) {
+        gameOver();
+      } else {
+        draw();
+      }
+    }
+
+    requestAnimationFrame(loop);
+  }
+
+  draw();
+  updateDisplay();
+  requestAnimationFrame(loop);
+})();
+</script>
+
+</body>
+</html>

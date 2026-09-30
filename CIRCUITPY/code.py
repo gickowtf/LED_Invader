@@ -11,9 +11,7 @@ from adafruit_display_text import label
 import adafruit_displayio_ssd1306
 import i2cdisplaybus
 
-import audiopwmio
-import synthio
-from array import array
+import pwmio
 import microcontroller
 import struct
 
@@ -78,11 +76,24 @@ class SimpleNeoPixel:
 # =========================================
 
 NUM_LEDS = 60
-PIXEL_PIN = board.GP0
-
-BTN_RED_PIN = board.GP10
-BTN_GREEN_PIN = board.GP11
-BTN_BLUE_PIN = board.GP12
+if hasattr(board, "IO0"):
+    # Maker Go ESP32-C3 Supermini
+    PIXEL_PIN = board.IO7
+    BTN_RED_PIN = board.IO0
+    BTN_GREEN_PIN = board.IO1
+    BTN_BLUE_PIN = board.IO3
+    OLED_SCL_PIN = board.IO4
+    OLED_SDA_PIN = board.IO5
+    AUDIO_PIN = board.IO6
+else:
+    # RP2040 Zero
+    PIXEL_PIN = board.GP0
+    BTN_RED_PIN = board.GP10
+    BTN_GREEN_PIN = board.GP11
+    BTN_BLUE_PIN = board.GP12
+    OLED_SCL_PIN = board.GP5
+    OLED_SDA_PIN = board.GP4
+    AUDIO_PIN = board.GP15
 
 BRIGHTNESS = 0.4
 
@@ -111,7 +122,7 @@ prev_button_state = [True, True, True]
 
 # ====== OLED INITIALISIEREN (SSD1306 128x64, CP 10-kompatibel) ======
 displayio.release_displays()
-i2c = busio.I2C(board.GP5, board.GP4)  # SCL=GP5, SDA=GP4 (anpassen falls nötig)
+i2c = busio.I2C(OLED_SCL_PIN, OLED_SDA_PIN)
 
 display_bus = i2cdisplaybus.I2CDisplayBus(i2c, device_address=0x3C)
 
@@ -132,19 +143,10 @@ effect_label = label.Label(terminalio.FONT, text="", x=0, y=32)  # mittig
 oled_root.append(hud_label)
 oled_root.append(effect_label)
 
-# ====== AUDIO INITIALISIEREN (PAM8302 an GP15) ======
-
-# Pin kurz auf Low ziehen (optional gegen Einschalt-Rauschen)
-dummy = digitalio.DigitalInOut(board.GP15)
-dummy.direction = digitalio.Direction.OUTPUT
-dummy.value = False
-dummy.deinit()
-
-audio = audiopwmio.PWMAudioOut(board.GP15)
-synth = synthio.Synthesizer(sample_rate=22050)
-
-# Eigene 16-bit Square-Wave für synthio
-SQUARE_WAVE = array('h', [-30000, 30000])
+# ====== AUDIO INITIALISIEREN (PAM8302) ======
+audio = pwmio.PWMOut(
+    AUDIO_PIN, frequency=440, duty_cycle=0, variable_frequency=True
+)
 
 # =========================================
 #              SPIELZUSTAND
@@ -215,7 +217,11 @@ def save_highscore():
 # =========================================
 
 def stop_notes():
-    synth.release_all()
+    audio.duty_cycle = 0
+
+def play_tone(frequency):
+    audio.frequency = frequency
+    audio.duty_cycle = 32768
 
 def start_sfx(seq):
     """
@@ -241,16 +247,7 @@ def sound_update(now):
         stop_notes()
 
         if freq > 0:
-            # normaler Ton
-            note = synthio.Note(frequency=freq, waveform=SQUARE_WAVE)
-            synth.press(note)
-            audio.play(synth)
-        else:
-            # Pause: kein Ton, Audio aus
-            try:
-                audio.stop()
-            except Exception:
-                pass
+            play_tone(freq)
 
         sfx_step_end = now + duration
         sfx_playing = True
@@ -259,10 +256,6 @@ def sound_update(now):
     # Ton läuft – fertig?
     if now >= sfx_step_end:
         stop_notes()
-        try:
-            audio.stop()
-        except Exception:
-            pass
         sfx_index += 1
 
         # Sequence zu Ende?
@@ -275,15 +268,7 @@ def sound_update(now):
         freq, duration = current_sfx[sfx_index]
 
         if freq > 0:
-            note = synthio.Note(frequency=freq, waveform=SQUARE_WAVE)
-            synth.press(note)
-            audio.play(synth)
-        else:
-            stop_notes()
-            try:
-                audio.stop()
-            except Exception:
-                pass
+            play_tone(freq)
 
         sfx_step_end = now + duration
         sfx_playing = True
